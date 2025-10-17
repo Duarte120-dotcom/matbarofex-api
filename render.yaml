@@ -1,1 +1,19 @@
+services:
+  - type: web
+    name: matbarofex-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: ROFX_USER
+        sync: false
+      - key: ROFX_PASSWORD
+        sync: false
+      - key: ROFX_REFRESH
+        sync: false
+      - key: ROFX_ACCESS
+        sync: false
+
 
