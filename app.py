@@ -4,110 +4,95 @@ import time
 
 app = Flask(__name__)
 
-# Credenciales para obtener token automáticamente
 USERNAME = "fduarte"
 PASSWORD = "Numero120"
 
-# Cache en memoria del token
 ACCESS_TOKEN = None
-ACCESS_EXP = 0  # epoch seconds (estimado)
+TOKEN_EXPIRATION = 0
 
-# Símbolos válidos del MTR
 SYMBOLS = [
-    "I.BTC", "I.SOJA", "I.MAIZ", "I.TRIGO",
-    "I.CCL", "I.RFX20", "I.ETH", "I.CAUCION"
+    "I.TRIGO", "I.MAIZ", "I.SOJA", "I.CCL",
+    "I.RFX20", "I.ETH", "I.BTC", "I.CAUCION"
 ]
-
-TOKEN_URL = "https://api.matbarofex.com.ar/v2/token/"
-SYMBOL_URL = "https://api.matbarofex.com.ar/v2/symbol/{symbol}"
-
-
-def _now() -> int:
-    return int(time.time())
 
 
 def get_new_token():
-    """Pide un nuevo access token a /v2/token/ usando username/password."""
-    global ACCESS_TOKEN, ACCESS_EXP
+    """Obtiene un nuevo token válido desde el endpoint correcto."""
+    global ACCESS_TOKEN, TOKEN_EXPIRATION
     try:
-        r = requests.post(
-            TOKEN_URL,
-            json={"username": USERNAME, "password": PASSWORD},
-            timeout=12,
-            headers={"Content-Type": "application/json"},
-        )
-        if r.status_code != 200:
-            raise RuntimeError(f"Token request failed: {r.status_code} {r.text}")
+        url = "https://api.matbarofex.com.ar/v2/token/"
+        payload = {"username": USERNAME, "password": PASSWORD}
+        headers = {"Content-Type": "application/json"}
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
 
-        data = r.json()
-        ACCESS_TOKEN = data.get("access")
-        # el access dura ~24h; dejamos margen de 23h
-        ACCESS_EXP = _now() + 23 * 3600
-        print("✅ Nuevo access token obtenido")
+        if r.status_code == 200:
+            data = r.json()
+            ACCESS_TOKEN = data.get("access")
+            TOKEN_EXPIRATION = time.time() + 23 * 3600  # 23 h de validez
+            print("✅ Nuevo token obtenido correctamente.")
+        else:
+            print("❌ Error al pedir token:", r.text)
+            ACCESS_TOKEN = None
     except Exception as e:
-        print("❌ Error obteniendo token:", e)
+        print("⚠️ Error de conexión al pedir token:", e)
         ACCESS_TOKEN = None
-        ACCESS_EXP = 0
 
 
 def get_token():
-    """Devuelve un access token válido; renueva si venció o no existe."""
-    if ACCESS_TOKEN is None or _now() >= ACCESS_EXP:
+    """Devuelve un token válido o genera uno nuevo si está vencido."""
+    if not ACCESS_TOKEN or time.time() > TOKEN_EXPIRATION:
         get_new_token()
     return ACCESS_TOKEN
 
 
-def fetch_symbol(symbol: str, retry: bool = True):
-    """Consulta /v2/symbol/<symbol>. Si 401, renueva token y reintenta una vez."""
+def get_symbol_data(symbol):
+    """Consulta un símbolo y renueva token automáticamente si hace falta."""
     token = get_token()
     if not token:
         return {"symbol": symbol, "error": "no_token"}
 
     headers = {"Authorization": f"Bearer {token}"}
-    url = SYMBOL_URL.format(symbol=symbol)
-    r = requests.get(url, headers=headers, timeout=12)
+    url = f"https://api.matbarofex.com.ar/v2/symbol/{symbol}"
+    r = requests.get(url, headers=headers, timeout=10)
 
-    if r.status_code == 401 and retry:
-        # token inválido/vencido → renuevo y reintento una vez
+    # Si devuelve 401, el token expiró → renovamos y reintentamos
+    if r.status_code == 401:
         get_new_token()
-        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"} if ACCESS_TOKEN else {}
-        r = requests.get(url, headers=headers, timeout=12)
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+        r = requests.get(url, headers=headers, timeout=10)
 
     try:
         data = r.json()
     except Exception:
-        return {"symbol": symbol, "error": f"bad_json status={r.status_code}"}
+        return {"symbol": symbol, "error": f"Respuesta inválida ({r.status_code})"}
 
-    # si la API devuelve estructura de error, la propagamos con el símbolo
-    if isinstance(data, dict) and "code" in data and data["code"] == "token_not_valid":
+    if "code" in data and data["code"] == "token_not_valid":
         return {"symbol": symbol, "error": "token_not_valid"}
 
-    if isinstance(data, dict):
-        data["symbol"] = symbol
+    data["symbol"] = symbol
     return data
 
 
 @app.route("/")
-def root():
-    return {
+def home():
+    return jsonify({
         "status": "ok",
-        "message": "Matba-Rofex proxy listo",
-        "symbols": SYMBOLS,
-        "endpoints": ["/symbol/<SYMBOL>", "/all"]
-    }
+        "message": "Servidor Matba-Rofex funcionando correctamente",
+        "endpoints": ["/symbol/I.TRIGO", "/all"]
+    })
 
 
 @app.route("/symbol/<symbol>")
 def symbol(symbol):
-    return jsonify(fetch_symbol(symbol))
+    return jsonify(get_symbol_data(symbol))
 
 
 @app.route("/all")
 def all_symbols():
-    out = []
+    results = []
     for s in SYMBOLS:
-        out.append(fetch_symbol(s))
-    return jsonify(out)
+        results.append(get_symbol_data(s))
+    return jsonify(results)
 
 
 if __name__ == "__main__":
