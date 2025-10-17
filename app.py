@@ -60,69 +60,55 @@ def fetch_json(url):
         return {"error": f"Invalid response {r.status_code}"}
 
 
-@app.route("/")
-def home():
-    return jsonify({
-        "status": "ok",
-        "message": "Proxy Matba-Rofex funcionando.",
-        "examples": [
-            "/symbol/I.TRIGO",
-            "/futures/TRIGO",
-            "/crop/TRIGO"
-        ]
-    })
-
-
-@app.route("/symbol/<symbol>")
-def symbol(symbol):
-    """Devuelve la información completa de un símbolo (spot o futuro)."""
+@app.route("/spot/<base_symbol>")
+def spot(base_symbol):
+    """Devuelve el valor spot de un cultivo (I.TRIGO, I.SOJA, etc.)"""
+    base = base_symbol.upper()
+    symbol = f"I.{base}"
     data = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{symbol}")
     return jsonify(data)
 
 
 @app.route("/futures/<base_symbol>")
 def futures(base_symbol):
-    """Devuelve todos los contratos futuros de un cultivo base."""
+    """Devuelve los futuros individuales del cultivo."""
     base = base_symbol.upper()
     all_instruments = fetch_json("https://api.matbarofex.com.ar/v2/instrument/")
     if not isinstance(all_instruments, list):
         return jsonify({"error": "invalid_response", "data": all_instruments})
 
-    futures_filtered = [
+    # Filtrar futuros de ese cultivo
+    futures_list = [
         i for i in all_instruments
-        if base in i.get("symbol", "")
+        if base in i.get("symbol", "") and not i.get("symbol", "").startswith("I.")
     ]
-    return jsonify(futures_filtered)
+
+    detailed = []
+    for f in futures_list:
+        sym = f.get("symbol")
+        if sym:
+            info = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{sym}")
+            if isinstance(info, dict):
+                info["symbol"] = sym
+                detailed.append(info)
+
+    return jsonify(detailed)
 
 
-@app.route("/crop/<base_symbol>")
-def crop(base_symbol):
-    """Devuelve el disponible (spot) y todos los futuros de un cultivo."""
-    base = base_symbol.upper()
-    result = {"base": base, "spot": None, "futures": []}
+@app.route("/all_futures")
+def all_futures():
+    """Devuelve todos los futuros conocidos (para todos los cultivos)."""
+    instruments = fetch_json("https://api.matbarofex.com.ar/v2/instrument/")
+    if not isinstance(instruments, list):
+        return jsonify({"error": "invalid_response", "data": instruments})
 
-    # Spot
-    spot_symbol = f"I.{base}"
-    spot = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{spot_symbol}")
-    result["spot"] = spot
-
-    # Futuros
-    all_instruments = fetch_json("https://api.matbarofex.com.ar/v2/instrument/")
-    if isinstance(all_instruments, list):
-        futures_data = []
-        for inst in all_instruments:
-            sym = inst.get("symbol")
-            if sym and base in sym and not sym.startswith("I."):
-                data_fut = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{sym}")
-                if isinstance(data_fut, dict):
-                    data_fut["symbol"] = sym
-                    futures_data.append(data_fut)
-        result["futures"] = futures_data
-    else:
-        result["futures_error"] = all_instruments
+    result = []
+    for inst in instruments:
+        sym = inst.get("symbol")
+        if sym and not sym.startswith("I."):
+            info = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{sym}")
+            if isinstance(info, dict):
+                info["symbol"] = sym
+                result.append(info)
 
     return jsonify(result)
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
