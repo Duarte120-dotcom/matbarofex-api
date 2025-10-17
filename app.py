@@ -1,10 +1,10 @@
 from flask import Flask, jsonify
 import requests
+import os
 import time
 
 app = Flask(__name__)
 
-# Credenciales
 USERNAME = "fduarte"
 PASSWORD = "Numero120"
 
@@ -34,25 +34,24 @@ def get_new_token():
 
 
 def get_token():
-    """Devuelve un token válido."""
     if not ACCESS_TOKEN or time.time() > TOKEN_EXP:
         get_new_token()
     return ACCESS_TOKEN
 
 
 def fetch_json(url):
-    """Consulta una URL con token válido."""
+    """Hace una solicitud GET autenticada."""
     token = get_token()
     if not token:
         return {"error": "no_token"}
 
     headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(url, headers=headers, timeout=15)
+    r = requests.get(url, headers=headers, timeout=20)
 
     if r.status_code == 401:
         get_new_token()
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
-        r = requests.get(url, headers=headers, timeout=15)
+        r = requests.get(url, headers=headers, timeout=20)
 
     try:
         return r.json()
@@ -60,55 +59,54 @@ def fetch_json(url):
         return {"error": f"Invalid response {r.status_code}"}
 
 
-@app.route("/spot/<base_symbol>")
-def spot(base_symbol):
-    """Devuelve el valor spot de un cultivo (I.TRIGO, I.SOJA, etc.)"""
-    base = base_symbol.upper()
-    symbol = f"I.{base}"
+@app.route("/")
+def home():
+    return jsonify({
+        "status": "ok",
+        "message": "Servidor proxy Matba-Rofex activo",
+        "routes": ["/symbol/I.TRIGO", "/futures/TRIGO", "/crop/TRIGO"]
+    })
+
+
+@app.route("/symbol/<symbol>")
+def symbol(symbol):
+    """Devuelve info completa de un símbolo (spot o futuro)."""
     data = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{symbol}")
     return jsonify(data)
 
 
-@app.route("/futures/<base_symbol>")
-def futures(base_symbol):
-    """Devuelve los futuros individuales del cultivo."""
-    base = base_symbol.upper()
-    all_instruments = fetch_json("https://api.matbarofex.com.ar/v2/instrument/")
-    if not isinstance(all_instruments, list):
-        return jsonify({"error": "invalid_response", "data": all_instruments})
-
-    # Filtrar futuros de ese cultivo
-    futures_list = [
-        i for i in all_instruments
-        if base in i.get("symbol", "") and not i.get("symbol", "").startswith("I.")
-    ]
-
-    detailed = []
-    for f in futures_list:
-        sym = f.get("symbol")
-        if sym:
-            info = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{sym}")
-            if isinstance(info, dict):
-                info["symbol"] = sym
-                detailed.append(info)
-
-    return jsonify(detailed)
-
-
-@app.route("/all_futures")
-def all_futures():
-    """Devuelve todos los futuros conocidos (para todos los cultivos)."""
+@app.route("/futures/<base>")
+def futures(base):
+    """Devuelve todos los contratos futuros de un cultivo."""
+    base = base.upper()
     instruments = fetch_json("https://api.matbarofex.com.ar/v2/instrument/")
     if not isinstance(instruments, list):
-        return jsonify({"error": "invalid_response", "data": instruments})
+        return jsonify({"error": "no_data", "data": instruments})
 
-    result = []
-    for inst in instruments:
-        sym = inst.get("symbol")
-        if sym and not sym.startswith("I."):
-            info = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/{sym}")
-            if isinstance(info, dict):
-                info["symbol"] = sym
-                result.append(info)
+    filtered = [
+        i for i in instruments
+        if base in i.get("symbol", "") and not i["symbol"].startswith("I.")
+    ]
+    return jsonify(filtered)
+
+
+@app.route("/crop/<base>")
+def crop(base):
+    """Devuelve disponible y futuros del cultivo."""
+    base = base.upper()
+    result = {"base": base, "spot": None, "futures": []}
+
+    # Spot
+    spot = fetch_json(f"https://api.matbarofex.com.ar/v2/symbol/I.{base}")
+    result["spot"] = spot
+
+    # Futuros
+    futures_data = fetch_json(f"https://matbarofex-proxy.onrender.com/futures/{base}")
+    result["futures"] = futures_data
 
     return jsonify(result)
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
