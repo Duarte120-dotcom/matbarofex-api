@@ -10,42 +10,46 @@ PASSWORD = "Numero120"
 ACCESS_TOKEN = None
 TOKEN_EXP = 0
 
-# Solo símbolos accesibles sin permisos especiales
-SYMBOLS = ["I.TRIGO", "I.MAIZ", "I.CCL", "I.RFX20", "I.ETH", "I.BTC"]
+# Lista completa de símbolos que querés tener disponibles
+SYMBOLS = ["I.TRIGO", "I.MAIZ", "I.SOJA", "I.CCL", "I.RFX20", "I.ETH", "I.BTC"]
 
 def get_new_token():
-    """Obtiene un token de MatbaRofex."""
+    """Pide un nuevo token válido desde el endpoint oficial de Matba-Rofex."""
     global ACCESS_TOKEN, TOKEN_EXP
     try:
-        url = "https://api.matbarofex.com.ar/v2/token/"
-        payload = {"username": USERNAME, "password": PASSWORD}
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(
+            "https://api.matbarofex.com.ar/v2/token/",
+            json={"username": USERNAME, "password": PASSWORD},
+            timeout=10
+        )
         if r.status_code == 200:
             ACCESS_TOKEN = r.json().get("access")
-            TOKEN_EXP = time.time() + 23 * 3600
-            print("✅ Nuevo token generado correctamente.")
+            TOKEN_EXP = time.time() + 23 * 3600  # válido por ~23 h
+            print("✅ Nuevo token obtenido correctamente.")
         else:
-            print("❌ Error al generar token:", r.text)
+            print("❌ Error al obtener token:", r.text)
             ACCESS_TOKEN = None
     except Exception as e:
-        print("⚠️ Error al conectar:", e)
+        print("⚠️ Error de conexión al pedir token:", e)
         ACCESS_TOKEN = None
 
 
 def get_token():
+    """Devuelve un token válido o lo renueva si expiró."""
     if not ACCESS_TOKEN or time.time() > TOKEN_EXP:
         get_new_token()
     return ACCESS_TOKEN
 
 
 def fetch_symbol(symbol):
-    """Devuelve un símbolo, reintentando si el token vence."""
+    """Devuelve la información de un símbolo (con reintento)."""
     token = get_token()
     if not token:
-        return {"symbol": symbol, "error": "token_missing"}
+        return {"symbol": symbol, "error": "no_token"}
 
     headers = {"Authorization": f"Bearer {token}"}
     url = f"https://api.matbarofex.com.ar/v2/symbol/{symbol}"
+
     r = requests.get(url, headers=headers, timeout=10)
 
     if r.status_code == 401:  # token vencido
@@ -56,9 +60,9 @@ def fetch_symbol(symbol):
     try:
         data = r.json()
     except Exception:
-        return {"symbol": symbol, "error": "invalid_json"}
+        return {"symbol": symbol, "error": f"invalid_response_{r.status_code}"}
 
-    # Filtramos errores de permisos (Power BI los interpretaba mal)
+    # Si la API devuelve permiso denegado, lo avisamos claramente
     if isinstance(data, dict) and data.get("detail", "").startswith("You do not have permission"):
         return {"symbol": symbol, "error": "no_permission"}
 
@@ -68,20 +72,19 @@ def fetch_symbol(symbol):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "ok", "message": "Servidor listo", "symbols": SYMBOLS})
+    return jsonify({
+        "status": "ok",
+        "symbols": SYMBOLS,
+        "example": "https://matbarofex-proxy.onrender.com/symbol/I.TRIGO"
+    })
 
 
-@app.route("/all")
-def all_data():
-    """Combina todos los símbolos accesibles en una lista JSON simple."""
-    results = []
-    for s in SYMBOLS:
-        results.append(fetch_symbol(s))
-    # Power BI necesita JSON plano, no anidado
-    return jsonify(results)
+@app.route("/symbol/<symbol>")
+def symbol(symbol):
+    """Endpoint individual para cada símbolo."""
+    return jsonify(fetch_symbol(symbol))
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
-
 
