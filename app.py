@@ -4,87 +4,110 @@ import time
 
 app = Flask(__name__)
 
-# Credenciales (solo se usan dentro del servidor, seguras)
+# Credenciales para obtener token automáticamente
 USERNAME = "fduarte"
 PASSWORD = "Numero120"
 
-# Token cacheado en memoria
+# Cache en memoria del token
 ACCESS_TOKEN = None
-TOKEN_EXPIRES_AT = 0
+ACCESS_EXP = 0  # epoch seconds (estimado)
 
-# Lista de índices del Matba-Rofex
+# Símbolos válidos del MTR
 SYMBOLS = [
-    "I.TRIGO", "I.MAIZ", "I.SOJA", "I.CCL", "I.RFX20",
-    "I.ETH", "I.BTC", "I.CAUCI", "I.CAU", "I.DLR"
+    "I.BTC", "I.SOJA", "I.MAIZ", "I.TRIGO",
+    "I.CCL", "I.RFX20", "I.ETH", "I.CAUCION"
 ]
+
+TOKEN_URL = "https://api.matbarofex.com.ar/v2/token/"
+SYMBOL_URL = "https://api.matbarofex.com.ar/v2/symbol/{symbol}"
+
+
+def _now() -> int:
+    return int(time.time())
 
 
 def get_new_token():
-    """Solicita un nuevo token de acceso a la API de Matba-Rofex."""
-    global ACCESS_TOKEN, TOKEN_EXPIRES_AT
-    url = "https://api.matbarofex.com.ar/auth/token/"
-    data = {"username": USERNAME, "password": PASSWORD}
+    """Pide un nuevo access token a /v2/token/ usando username/password."""
+    global ACCESS_TOKEN, ACCESS_EXP
     try:
-        r = requests.post(url, json=data, timeout=10)
-        if r.status_code == 200:
-            ACCESS_TOKEN = r.json().get("access")
-            # expira en ~12 horas
-            TOKEN_EXPIRES_AT = time.time() + 11 * 3600
-            print("✅ Nuevo token obtenido correctamente.")
-        else:
-            print("⚠️ Error al obtener token:", r.text)
+        r = requests.post(
+            TOKEN_URL,
+            json={"username": USERNAME, "password": PASSWORD},
+            timeout=12,
+            headers={"Content-Type": "application/json"},
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"Token request failed: {r.status_code} {r.text}")
+
+        data = r.json()
+        ACCESS_TOKEN = data.get("access")
+        # el access dura ~24h; dejamos margen de 23h
+        ACCESS_EXP = _now() + 23 * 3600
+        print("✅ Nuevo access token obtenido")
     except Exception as e:
-        print("❌ Error al pedir token:", e)
+        print("❌ Error obteniendo token:", e)
+        ACCESS_TOKEN = None
+        ACCESS_EXP = 0
 
 
 def get_token():
-    """Devuelve el token válido, renovándolo si venció."""
-    global ACCESS_TOKEN
-    if ACCESS_TOKEN is None or time.time() > TOKEN_EXPIRES_AT:
+    """Devuelve un access token válido; renueva si venció o no existe."""
+    if ACCESS_TOKEN is None or _now() >= ACCESS_EXP:
         get_new_token()
     return ACCESS_TOKEN
 
 
-def get_symbol_data(symbol):
-    """Consulta un símbolo de la API con token actualizado."""
+def fetch_symbol(symbol: str, retry: bool = True):
+    """Consulta /v2/symbol/<symbol>. Si 401, renueva token y reintenta una vez."""
     token = get_token()
+    if not token:
+        return {"symbol": symbol, "error": "no_token"}
+
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://api.matbarofex.com.ar/v2/symbol/{symbol}"
-    r = requests.get(url, headers=headers, timeout=10)
-    return r.json()
+    url = SYMBOL_URL.format(symbol=symbol)
+    r = requests.get(url, headers=headers, timeout=12)
+
+    if r.status_code == 401 and retry:
+        # token inválido/vencido → renuevo y reintento una vez
+        get_new_token()
+        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"} if ACCESS_TOKEN else {}
+        r = requests.get(url, headers=headers, timeout=12)
+
+    try:
+        data = r.json()
+    except Exception:
+        return {"symbol": symbol, "error": f"bad_json status={r.status_code}"}
+
+    # si la API devuelve estructura de error, la propagamos con el símbolo
+    if isinstance(data, dict) and "code" in data and data["code"] == "token_not_valid":
+        return {"symbol": symbol, "error": "token_not_valid"}
+
+    if isinstance(data, dict):
+        data["symbol"] = symbol
+    return data
 
 
 @app.route("/")
-def home():
+def root():
     return {
         "status": "ok",
-        "message": "Servidor Matba-Rofex funcionando. Usa /symbol/<nombre> o /all"
+        "message": "Matba-Rofex proxy listo",
+        "symbols": SYMBOLS,
+        "endpoints": ["/symbol/<SYMBOL>", "/all"]
     }
 
 
 @app.route("/symbol/<symbol>")
 def symbol(symbol):
-    """Consulta un símbolo específico."""
-    try:
-        data = get_symbol_data(symbol)
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify(fetch_symbol(symbol))
 
 
 @app.route("/all")
 def all_symbols():
-    """Devuelve todos los índices en una sola tabla JSON."""
-    results = []
+    out = []
     for s in SYMBOLS:
-        try:
-            data = get_symbol_data(s)
-            if isinstance(data, dict):
-                data["symbol"] = s
-                results.append(data)
-        except Exception as e:
-            results.append({"symbol": s, "error": str(e)})
-    return jsonify(results)
+        out.append(fetch_symbol(s))
+    return jsonify(out)
 
 
 if __name__ == "__main__":
